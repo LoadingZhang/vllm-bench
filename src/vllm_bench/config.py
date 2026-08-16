@@ -25,7 +25,6 @@ class StrictModel(BaseModel):
 
 class DockerConfig(StrictModel):
     image: str
-    container_name: str
     host_models_path: Path
 
     @model_validator(mode="after")
@@ -42,7 +41,7 @@ class VariantConfig(StrictModel):
 
 
 class ServeConfig(StrictModel):
-    model: str
+    model: str | None = None
     fixed_args: RawArgs = Field(default_factory=dict)
     variants: list[VariantConfig]
 
@@ -90,7 +89,6 @@ class AppConfig(StrictModel):
     version: int = 1
     run_name: str
     output_dir: Path = Path("./results")
-    variables: dict[str, str | int | float] = Field(default_factory=dict)
     environment: dict[str, str | int | float] = Field(default_factory=dict)
     docker: DockerConfig
     jobs: list[JobConfig]
@@ -102,7 +100,55 @@ class AppConfig(StrictModel):
         _ensure_unique((job.name for job in self.jobs), "job")
         if not self.jobs:
             raise ValueError("jobs must contain at least one job")
+        for job in self.jobs:
+            self._apply_job_defaults(job)
         return self
+
+    def _apply_job_defaults(self, job: JobConfig) -> None:
+        model = job.serve.model or self._default_model()
+        served_model_name = self._default_served_model_name(model, job.serve.fixed_args)
+        port = self._default_port(job.serve.fixed_args)
+
+        job.serve.model = model
+        job.serve.fixed_args.setdefault("--served-model-name", served_model_name)
+        job.serve.fixed_args.setdefault("--port", port)
+
+        job.bench.fixed_args.setdefault("--host", "127.0.0.1")
+        job.bench.fixed_args.setdefault("--port", port)
+        job.bench.fixed_args.setdefault("--model", model)
+        job.bench.fixed_args.setdefault("--served-model-name", served_model_name)
+
+    def _default_model(self) -> str:
+        model = self.environment.get("MODEL")
+        if model is not None:
+            return str(model)
+
+        model_path = self.environment.get("MODEL_PATH")
+        if model_path is None:
+            raise ValueError(
+                "serve.model is omitted; set environment.MODEL_PATH to the "
+                "complete model path, or set environment.MODEL"
+            )
+        return str(model_path)
+
+    def _default_served_model_name(self, model: str, serve_args: RawArgs) -> str:
+        explicit = serve_args.get("--served-model-name")
+        if explicit is not None:
+            return str(explicit)
+        configured = self.environment.get("SERVED_MODEL_NAME")
+        if configured is not None:
+            return str(configured)
+        model_name = self.environment.get("MODEL_NAME")
+        if model_name is not None:
+            return str(model_name)
+        return model.rstrip("/").rsplit("/", 1)[-1]
+
+    def _default_port(self, serve_args: RawArgs) -> int | str:
+        explicit = serve_args.get("--port")
+        if explicit is not None:
+            return explicit
+        configured = self.environment.get("VLLM_PORT")
+        return 8000 if configured is None else str(configured)
 
 
 def _ensure_unique(values: Any, label: str) -> None:
@@ -177,8 +223,8 @@ def _walk_arg_maps(data: dict[str, Any]) -> None:
 
 def _resolve_string(
     value: str,
-    variables: Mapping[str, str],
-    environment: Mapping[str, str],
+    configured_environment: Mapping[str, str],
+    host_environment: Mapping[str, str],
     stack: tuple[str, ...] = (),
 ) -> str:
     def replace(match: re.Match[str]) -> str:
@@ -186,13 +232,18 @@ def _resolve_string(
         if name in stack:
             chain = " -> ".join((*stack, name))
             raise ValueError(f"variable reference cycle: {chain}")
-        if name in variables:
-            raw = variables[name]
-        elif name in environment:
-            raw = environment[name]
+        if name in configured_environment:
+            raw = configured_environment[name]
+        elif name in host_environment:
+            raw = host_environment[name]
         else:
             raise ValueError(f"undefined variable: {name}")
-        return _resolve_string(raw, variables, environment, (*stack, name))
+        return _resolve_string(
+            raw,
+            configured_environment,
+            host_environment,
+            (*stack, name),
+        )
 
     previous = None
     resolved = value
@@ -203,15 +254,20 @@ def _resolve_string(
 
 
 def _resolve_tree(
-    value: Any, variables: Mapping[str, str], environment: Mapping[str, str]
+    value: Any,
+    configured_environment: Mapping[str, str],
+    host_environment: Mapping[str, str],
 ) -> Any:
     if isinstance(value, str):
-        return _resolve_string(value, variables, environment)
+        return _resolve_string(value, configured_environment, host_environment)
     if isinstance(value, list):
-        return [_resolve_tree(item, variables, environment) for item in value]
+        return [
+            _resolve_tree(item, configured_environment, host_environment)
+            for item in value
+        ]
     if isinstance(value, dict):
         return {
-            key: _resolve_tree(item, variables, environment)
+            key: _resolve_tree(item, configured_environment, host_environment)
             for key, item in value.items()
         }
     return value
@@ -225,16 +281,28 @@ def load_config(
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("configuration root must be an object")
-    variables_raw = raw.get("variables", {})
-    if not isinstance(variables_raw, dict):
-        raise ValueError("variables must be an object")
-    variables = {str(key): str(value) for key, value in variables_raw.items()}
-    expanded = _resolve_tree(raw, variables, os.environ)
+    environment_raw = raw.get("environment", {})
+    if not isinstance(environment_raw, dict):
+        raise ValueError("environment must be an object")
+    environment_sources = {
+        str(key): str(value) for key, value in environment_raw.items()
+    }
+    resolved_environment = {
+        key: _resolve_string(
+            value,
+            environment_sources,
+            os.environ,
+            stack=(key,),
+        )
+        for key, value in environment_sources.items()
+    }
+    raw["environment"] = resolved_environment
+    expanded = _resolve_tree(raw, resolved_environment, os.environ)
     if run_name is not None:
         expanded["run_name"] = run_name
     _walk_arg_maps(expanded)
     config = AppConfig.model_validate(expanded)
-    return config, expanded
+    return config, config.model_dump(mode="json")
 
 
 def config_digest(expanded: dict[str, Any]) -> str:

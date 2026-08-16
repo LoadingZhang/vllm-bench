@@ -45,26 +45,37 @@ class FakeDocker(DockerClient):
         self.removed = True
 
 
+class CollisionDocker(FakeDocker):
+    def container_exists(self, name):
+        return name == "occupied"
+
+    def inspect_container(self, name):
+        image = "sha256:other" if name == "occupied" else "sha256:id"
+        return {"Image": image, "State": {"Running": True}}
+
+
 def config(tmp_path: Path) -> tuple[AppConfig, dict]:
     raw = {
         "version": 1,
         "run_name": "run",
         "output_dir": str(tmp_path / "results"),
+        "environment": {
+            "MODEL_PATH": "/models/model",
+            "VLLM_ENGINE_READY_TIMEOUT_S": "1200",
+        },
         "docker": {
             "image": "image:tag",
-            "container_name": "container",
             "host_models_path": str(tmp_path / "models"),
         },
         "jobs": [
             {
                 "name": "job",
                 "serve": {
-                    "model": "/models/model",
-                    "fixed_args": {"--port": 8000},
+                    "fixed_args": {},
                     "variants": [{"name": "tp8", "args": {"-tp": 8}}],
                 },
                 "bench": {
-                    "fixed_args": {"--model": "/models/model"},
+                    "fixed_args": {},
                     "stages": {
                         "prefill": {
                             "args": {
@@ -107,5 +118,27 @@ def test_runner_uses_one_sweep_for_both_stages_and_cleans_up(tmp_path: Path) -> 
     assert len(streams) == 1
     assert "--bench-params" in streams[0][2]
     assert docker.removed
+    creates = [command for command in docker.commands if command[0] == "create"]
+    container_name = creates[0][1]["name"]
+    assert container_name.startswith("vllm-bench-run-")
     manifest = json.loads((tmp_path / "results" / "run" / "manifest.json").read_text())
     assert manifest["docker"]["image_id"] == "sha256:id"
+    assert manifest["docker"]["container_name"] == container_name
+
+
+def test_runner_generates_another_name_on_collision(tmp_path: Path) -> None:
+    app_config, expanded = config(tmp_path)
+    docker = CollisionDocker()
+    runner = BenchmarkRunner(
+        app_config,
+        expanded,
+        docker=docker,
+        project_root=Path(__file__).parents[1],
+    )
+    runner.container_name = "occupied"
+
+    assert runner.run() == 0
+    creates = [command for command in docker.commands if command[0] == "create"]
+    assert len(creates) == 1
+    assert creates[0][1]["name"] != "occupied"
+    assert creates[0][1]["name"].startswith("vllm-bench-run-")

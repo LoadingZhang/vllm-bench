@@ -4,8 +4,11 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import signal
+import uuid
 from dataclasses import asdict
+from datetime import UTC, datetime
 from pathlib import Path
 from types import FrameType
 from typing import Any
@@ -59,6 +62,7 @@ class BenchmarkRunner:
         self.project_root = project_root or Path(__file__).resolve().parents[2]
         self.output_dir = config.output_dir.expanduser().resolve() / config.run_name
         self.container_root = f"{_CONTAINER_ROOT}/{config.run_name}"
+        self.container_name = self._initial_container_name()
         self.failures: list[dict[str, Any]] = []
         self.variant_metadata: dict[tuple[str, str], dict[str, str]] = {}
         self.expected_runs: dict[tuple[str, str], int] = {}
@@ -101,7 +105,7 @@ class BenchmarkRunner:
         finally:
             self._restore_signal_handlers()
             if self._container_ready and not self.keep_container:
-                self.docker.remove_container(self.config.docker.container_name)
+                self.docker.remove_container(self.container_name)
 
     def _validate_runtime_config(self) -> None:
         if not self.config.docker.host_models_path.is_dir():
@@ -125,12 +129,12 @@ class BenchmarkRunner:
 
     def _run_dry(self) -> int:
         self.docker.create_container(
-            name=self.config.docker.container_name,
+            name=self.container_name,
             image=self.config.docker.image,
             models_path=self.config.docker.host_models_path,
         )
         self.docker.exec(
-            self.config.docker.container_name,
+            self.container_name,
             ["vllm", "bench", "sweep", "serve_workload", "--help"],
         )
         for job in self.config.jobs:
@@ -140,12 +144,12 @@ class BenchmarkRunner:
                 )
                 with _NullLog() as log:
                     self.docker.exec_stream(
-                        self.config.docker.container_name,
+                        self.container_name,
                         sweep_command,
                         log,
                         environment=self._environment(),
                     )
-        self.docker.remove_container(self.config.docker.container_name)
+        self.docker.remove_container(self.container_name)
         return 0
 
     def _prepare_output_dir(self) -> None:
@@ -178,20 +182,20 @@ class BenchmarkRunner:
         if not self.docker.daemon_available():
             raise RuntimeError("Docker daemon is unavailable")
 
-        name = self.config.docker.container_name
+        name = self.container_name
         if self.docker.container_exists(name):
-            if not self.resume:
-                raise ValueError(f"Docker container already exists: {name}")
-            expected = self._existing_image_id()
             inspected = self.docker.inspect_container(name)
+            expected = self._existing_image_id()
             actual = str(inspected.get("Image", ""))
-            if expected and actual != expected:
-                raise ValueError(
-                    f"existing container image ID {actual} does not match {expected}"
-                )
-            if not inspected.get("State", {}).get("Running", False):
-                self.docker.start_container(name)
-        else:
+            reusable = self.resume and expected is not None and actual == expected
+            if reusable:
+                if not inspected.get("State", {}).get("Running", False):
+                    self.docker.start_container(name)
+            else:
+                self.container_name = self._new_available_container_name()
+                name = self.container_name
+
+        if not self.docker.container_exists(name):
             self.docker.create_container(
                 name=name,
                 image=self.config.docker.image,
@@ -206,7 +210,7 @@ class BenchmarkRunner:
         self.docker.exec(name, ["vllm", "bench", "sweep", "serve_workload", "--help"])
 
     def _install_container_files(self) -> None:
-        name = self.config.docker.container_name
+        name = self.container_name
         self.docker.exec(name, ["mkdir", "-p", self.container_root])
         wrapper = self.project_root / "src" / "vllm_bench" / "bench_wrapper.py"
         self.docker.copy_to(wrapper, name, f"{self.container_root}/bench_wrapper.py")
@@ -235,7 +239,7 @@ class BenchmarkRunner:
                     log_mode = "a" if resume_variant else "w"
                     with log_path.open(log_mode, encoding="utf-8") as log:
                         returncode = self.docker.exec_stream(
-                            self.config.docker.container_name,
+                            self.container_name,
                             sweep_command,
                             log,
                             environment=self._environment(),
@@ -283,13 +287,13 @@ class BenchmarkRunner:
             write_profiles(profiles_path, job.bench.fixed_args, stages)
             write_bench_params(bench_params_path, list(stages))
             self.docker.exec(
-                self.config.docker.container_name,
+                self.container_name,
                 ["mkdir", "-p", container_generated],
             )
             container_generated_parent = container_generated.rsplit("/", 1)[0]
             self.docker.copy_to(
                 host_generated,
-                self.config.docker.container_name,
+                self.container_name,
                 container_generated_parent,
             )
 
@@ -320,9 +324,7 @@ class BenchmarkRunner:
         host_parent = self.output_dir / "raw" / job / variant
         container_path = f"{self.container_root}/raw/{job}/{variant}/workload"
         try:
-            self.docker.copy_from(
-                self.config.docker.container_name, container_path, host_parent
-            )
+            self.docker.copy_from(self.container_name, container_path, host_parent)
         except CommandError as exc:
             if not any(
                 failure["job"] == job and failure["variant"] == variant
@@ -371,7 +373,7 @@ class BenchmarkRunner:
             "config_sha256": self._digest(),
             "docker": {
                 **image_data,
-                "container_name": self.config.docker.container_name,
+                "container_name": self.container_name,
                 "host_models_path": str(self.config.docker.host_models_path),
             },
         }
@@ -396,6 +398,29 @@ class BenchmarkRunner:
 
     def _handle_signal(self, signum: int, _frame: FrameType | None) -> None:
         raise KeyboardInterrupt(f"received signal {signum}")
+
+    def _initial_container_name(self) -> str:
+        manifest_path = self.output_dir / "manifest.json"
+        if self.resume and manifest_path.exists():
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            container_name = manifest.get("docker", {}).get("container_name")
+            if container_name:
+                return str(container_name)
+        return self._generate_container_name()
+
+    def _new_available_container_name(self) -> str:
+        for _ in range(100):
+            candidate = self._generate_container_name()
+            if not self.docker.container_exists(candidate):
+                return candidate
+        raise RuntimeError("failed to generate an available Docker container name")
+
+    def _generate_container_name(self) -> str:
+        run_slug = re.sub(r"[^a-zA-Z0-9_.-]+", "-", self.config.run_name).strip("-.")
+        run_slug = run_slug[:32] or "run"
+        timestamp = datetime.now(UTC).strftime("%Y%m%d%H%M%S")
+        suffix = uuid.uuid4().hex[:8]
+        return f"vllm-bench-{run_slug}-{timestamp}-{suffix}"
 
 
 class _NullLog:
