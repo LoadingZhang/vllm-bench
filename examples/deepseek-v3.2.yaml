@@ -2,13 +2,12 @@ version: 1
 run_name: dsv32-b200
 output_dir: ./results
 
-environment:
-  MODEL_PATH: /models/deepseek-ai/DeepSeek-V3.2
-  VLLM_ENGINE_READY_TIMEOUT_S: "1200"
-
 docker:
   image: vllm/vllm-openai:v0.20.2
-  host_models_path: /root/models
+  model_path: /root/models/deepseek-ai/DeepSeek-V3.2
+  compile_cache_path: /root/vllm-compile-cache
+  environment:
+    VLLM_ENGINE_READY_TIMEOUT_S: "1200"
 
 jobs:
   - name: dsv32
@@ -16,13 +15,14 @@ jobs:
       fixed_args:
         --trust-remote-code: 
         --load-format: fastsafetensors
-        --kernel-config.enable_flashinfer_autotune: "False"
+        --max-num-seqs: 128
         --enable-chunked-prefill: 
+        --no-enable-prefix-caching: 
+        --kernel-config.enable_flashinfer_autotune: "False"
         --reasoning-parser: deepseek_v3
         --tokenizer-mode: deepseek_v32
         --tool-call-parser: deepseek_v32
         --enable-auto-tool-choice: 
-        --no-enable-prefix-caching: 
       variants:
         - name: tp8
           args:
@@ -44,7 +44,7 @@ jobs:
         --trust-remote-code: 
         --dataset-name: random
         --random-range-ratio: 0.0
-        --num-prompts: 64
+        --num-prompts: 128
         --request-rate: inf
         --temperature: 0
         --num-warmups: 100

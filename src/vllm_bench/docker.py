@@ -113,28 +113,36 @@ class DockerClient:
     def start_container(self, name: str) -> None:
         self.run(["docker", "start", name])
 
-    def create_container(self, *, name: str, image: str, models_path: Path) -> None:
-        self.run(
-            [
-                "docker",
-                "run",
-                "--name",
-                name,
-                "--gpus",
-                "all",
-                "--privileged",
-                "--ipc=host",
-                "--net=host",
-                "-it",
-                "--entrypoint",
-                "bash",
-                "-v",
-                f"{models_path}:/models",
-                "-d",
-                image,
-            ],
-            capture=False,
-        )
+    def create_container(
+        self,
+        *,
+        name: str,
+        image: str,
+        model_path: Path,
+        container_model_path: str,
+        compile_cache_path: Path | None = None,
+        container_cache_root: str = "/root/.cache/vllm",
+    ) -> None:
+        command = [
+            "docker",
+            "run",
+            "--name",
+            name,
+            "--gpus",
+            "all",
+            "--privileged",
+            "--ipc=host",
+            "--net=host",
+            "-it",
+            "--entrypoint",
+            "bash",
+            "-v",
+            f"{model_path}:{container_model_path}",
+        ]
+        if compile_cache_path is not None:
+            command.extend(("-v", f"{compile_cache_path}:{container_cache_root}"))
+        command.extend(("-d", image))
+        self.run(command, capture=False)
 
     def remove_container(self, name: str) -> None:
         self.run(["docker", "rm", "-f", name], check=False)

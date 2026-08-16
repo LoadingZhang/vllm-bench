@@ -15,6 +15,7 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 ArgValue = str | int | float | None | list[str | int | float]
 RawArgs = dict[str, ArgValue]
 _VAR_PATTERN = re.compile(r"\$\{([A-Za-z_][A-Za-z0-9_]*)\}")
+VLLM_CONTAINER_CACHE_ROOT = "/root/.cache/vllm"
 
 
 class StrictModel(BaseModel):
@@ -25,14 +26,30 @@ class StrictModel(BaseModel):
 
 class DockerConfig(StrictModel):
     image: str
-    host_models_path: Path
+    model_path: Path
+    compile_cache_path: Path | None = None
+    environment: dict[str, str | int | float] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_models_path(self) -> DockerConfig:
-        self.host_models_path = self.host_models_path.expanduser()
-        if not self.host_models_path.is_absolute():
-            raise ValueError("docker.host_models_path must be an absolute path")
+    def validate_host_paths(self) -> DockerConfig:
+        self.model_path = self.model_path.expanduser()
+        if not self.model_path.is_absolute():
+            raise ValueError("docker.model_path must be an absolute path")
+        if not self.model_path.name:
+            raise ValueError("docker.model_path must identify a model directory")
+        if self.compile_cache_path is not None:
+            self.compile_cache_path = self.compile_cache_path.expanduser()
+            if not self.compile_cache_path.is_absolute():
+                raise ValueError("docker.compile_cache_path must be an absolute path")
         return self
+
+    @property
+    def model_name(self) -> str:
+        return self.model_path.name
+
+    @property
+    def container_model_path(self) -> str:
+        return f"/models/{self.model_name}"
 
 
 class VariantConfig(StrictModel):
@@ -89,7 +106,6 @@ class AppConfig(StrictModel):
     version: int = 1
     run_name: str
     output_dir: Path = Path("./results")
-    environment: dict[str, str | int | float] = Field(default_factory=dict)
     docker: DockerConfig
     jobs: list[JobConfig]
 
@@ -100,6 +116,8 @@ class AppConfig(StrictModel):
         _ensure_unique((job.name for job in self.jobs), "job")
         if not self.jobs:
             raise ValueError("jobs must contain at least one job")
+        if self.docker.compile_cache_path is not None:
+            self.docker.environment["VLLM_CACHE_ROOT"] = VLLM_CONTAINER_CACHE_ROOT
         for job in self.jobs:
             self._apply_job_defaults(job)
         return self
@@ -119,35 +137,25 @@ class AppConfig(StrictModel):
         job.bench.fixed_args.setdefault("--served-model-name", served_model_name)
 
     def _default_model(self) -> str:
-        model = self.environment.get("MODEL")
-        if model is not None:
-            return str(model)
-
-        model_path = self.environment.get("MODEL_PATH")
-        if model_path is None:
-            raise ValueError(
-                "serve.model is omitted; set environment.MODEL_PATH to the "
-                "complete model path, or set environment.MODEL"
-            )
-        return str(model_path)
+        return self.docker.container_model_path
 
     def _default_served_model_name(self, model: str, serve_args: RawArgs) -> str:
         explicit = serve_args.get("--served-model-name")
         if explicit is not None:
             return str(explicit)
-        configured = self.environment.get("SERVED_MODEL_NAME")
+        configured = self.docker.environment.get("SERVED_MODEL_NAME")
         if configured is not None:
             return str(configured)
-        model_name = self.environment.get("MODEL_NAME")
+        model_name = self.docker.environment.get("MODEL_NAME")
         if model_name is not None:
             return str(model_name)
-        return model.rstrip("/").rsplit("/", 1)[-1]
+        return self.docker.model_name
 
     def _default_port(self, serve_args: RawArgs) -> int | str:
         explicit = serve_args.get("--port")
         if explicit is not None:
             return explicit
-        configured = self.environment.get("VLLM_PORT")
+        configured = self.docker.environment.get("VLLM_PORT")
         return 8000 if configured is None else str(configured)
 
 
@@ -281,9 +289,12 @@ def load_config(
     raw = yaml.safe_load(path.read_text(encoding="utf-8"))
     if not isinstance(raw, dict):
         raise ValueError("configuration root must be an object")
-    environment_raw = raw.get("environment", {})
+    docker_raw = raw.get("docker", {})
+    if not isinstance(docker_raw, dict):
+        raise ValueError("docker must be an object")
+    environment_raw = docker_raw.get("environment", {})
     if not isinstance(environment_raw, dict):
-        raise ValueError("environment must be an object")
+        raise ValueError("docker.environment must be an object")
     environment_sources = {
         str(key): str(value) for key, value in environment_raw.items()
     }
@@ -296,7 +307,7 @@ def load_config(
         )
         for key, value in environment_sources.items()
     }
-    raw["environment"] = resolved_environment
+    docker_raw["environment"] = resolved_environment
     expanded = _resolve_tree(raw, resolved_environment, os.environ)
     if run_name is not None:
         expanded["run_name"] = run_name

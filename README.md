@@ -32,7 +32,11 @@ Copy `examples/deepseek-v3.2.yaml` and set an absolute model directory:
 ```yaml
 docker:
   image: vllm/vllm-openai:v0.20.2
-  host_models_path: /data/models
+  model_path: /data/models/deepseek-ai/DeepSeek-V3.2
+  environment:
+    VLLM_ENGINE_READY_TIMEOUT_S: "1200"
+  # Optional persistent vLLM compile cache:
+  compile_cache_path: /data/vllm-compile-cache
 ```
 
 The tool generates a unique container name for every new run, for example:
@@ -41,7 +45,9 @@ The tool generates a unique container name for every new run, for example:
 docker run --name vllm-bench-dsv32-b200-20260816123000-a1b2c3d4 \
   --gpus all --privileged \
   --ipc=host --net=host -it --entrypoint bash \
-  -v /data/models:/models -d vllm/vllm-openai:v0.20.2
+  -v /data/models/deepseek-ai/DeepSeek-V3.2:/models/DeepSeek-V3.2 \
+  -v /data/vllm-compile-cache:/root/.cache/vllm \
+  -d vllm/vllm-openai:v0.20.2
 ```
 
 The generated name has the form:
@@ -49,6 +55,39 @@ The generated name has the form:
 ```text
 vllm-bench-<run-name>-<UTC timestamp>-<random suffix>
 ```
+
+### Persistent model compilation cache
+
+Set `docker.compile_cache_path` to reuse vLLM compilation artifacts
+between containers and benchmark runs:
+
+```yaml
+docker:
+  image: vllm/vllm-openai:v0.20.2
+  model_path: /data/models/deepseek-ai/DeepSeek-V3.2
+  compile_cache_path: /data/vllm-compile-cache
+```
+
+The host path must be absolute. The tool creates it when it does not exist,
+mounts it at:
+
+```text
+/root/.cache/vllm
+```
+
+and automatically passes:
+
+```text
+VLLM_CACHE_ROOT=/root/.cache/vllm
+```
+
+to the sweep, server, and benchmark processes. This persists vLLM's
+torch.compile/Inductor/Triton cache, DeepGEMM cache, and other cache entries
+that inherit from `VLLM_CACHE_ROOT`. Omit the field to keep the container's
+normal ephemeral cache behavior.
+
+The configured host cache path and container cache root are recorded in
+`manifest.json`.
 
 ### Literal argument rules
 
@@ -64,13 +103,13 @@ Argument keys must already be valid CLI options. No underscore/hyphen or alias
 conversion is performed. Use quoted strings for literal boolean values; YAML
 booleans are reserved for tool fields such as `enabled`.
 
-Configuration variables and container environment variables use the same
-top-level `environment` object:
+Configuration variables and container environment variables are configured
+under `docker.environment`:
 
 ```yaml
-environment:
-  MODEL_PATH: /models/deepseek-ai/DeepSeek-V3.2
-  VLLM_ENGINE_READY_TIMEOUT_S: "1200"
+docker:
+  environment:
+    VLLM_ENGINE_READY_TIMEOUT_S: "1200"
 ```
 
 `${NAME}` first resolves from this object, then from the host process
@@ -94,18 +133,22 @@ bench --port
 
 The defaults are derived as follows:
 
-- Model: `environment.MODEL_PATH`, which is the complete model path.
-  `environment.MODEL` remains supported as an explicit override.
-- Served model name: `environment.SERVED_MODEL_NAME`, then
-  `environment.MODEL_NAME`, then the final component of the model path.
-- Port: `environment.VLLM_PORT`, defaulting to `8000`.
+- `docker.model_path` is the complete host model directory.
+- The directory is mounted to `/models/<final directory name>` in the
+  container, and this generated container path is used as the serve/bench
+  model.
+- Served model name: `docker.environment.SERVED_MODEL_NAME`, then
+  `docker.environment.MODEL_NAME`, then the final component of
+  `docker.model_path`.
+- Port: `docker.environment.VLLM_PORT`, defaulting to `8000`.
 - Benchmark host: `127.0.0.1`.
 
 For example, this is sufficient:
 
 ```yaml
-environment:
-  MODEL_PATH: /models/deepseek-ai/DeepSeek-V3.2
+docker:
+  image: vllm/vllm-openai:v0.20.2
+  model_path: /data/models/deepseek-ai/DeepSeek-V3.2
 
 jobs:
   - name: dsv32

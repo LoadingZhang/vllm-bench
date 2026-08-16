@@ -23,7 +23,7 @@ from .commands import (
     write_bench_params,
     write_profiles,
 )
-from .config import AppConfig, config_digest
+from .config import VLLM_CONTAINER_CACHE_ROOT, AppConfig, config_digest
 from .docker import CommandError, DockerClient, ImageMetadata
 from .report import build_reports
 
@@ -108,11 +108,19 @@ class BenchmarkRunner:
                 self.docker.remove_container(self.container_name)
 
     def _validate_runtime_config(self) -> None:
-        if not self.config.docker.host_models_path.is_dir():
+        if not self.config.docker.model_path.is_dir():
             raise ValueError(
-                "docker.host_models_path does not exist or is not a directory: "
-                f"{self.config.docker.host_models_path}"
+                "docker.model_path does not exist or is not a directory: "
+                f"{self.config.docker.model_path}"
             )
+        compile_cache_path = self.config.docker.compile_cache_path
+        if compile_cache_path is not None:
+            compile_cache_path.mkdir(parents=True, exist_ok=True)
+            if not compile_cache_path.is_dir():
+                raise ValueError(
+                    "docker.compile_cache_path is not a directory: "
+                    f"{compile_cache_path}"
+                )
         for job in self.config.jobs:
             reserved = _RESERVED_SWEEP_ARGS.intersection(job.sweep.args)
             if reserved:
@@ -131,7 +139,10 @@ class BenchmarkRunner:
         self.docker.create_container(
             name=self.container_name,
             image=self.config.docker.image,
-            models_path=self.config.docker.host_models_path,
+            model_path=self.config.docker.model_path,
+            container_model_path=self.config.docker.container_model_path,
+            compile_cache_path=self.config.docker.compile_cache_path,
+            container_cache_root=VLLM_CONTAINER_CACHE_ROOT,
         )
         self.docker.exec(
             self.container_name,
@@ -199,7 +210,10 @@ class BenchmarkRunner:
             self.docker.create_container(
                 name=name,
                 image=self.config.docker.image,
-                models_path=self.config.docker.host_models_path,
+                model_path=self.config.docker.model_path,
+                container_model_path=self.config.docker.container_model_path,
+                compile_cache_path=self.config.docker.compile_cache_path,
+                container_cache_root=VLLM_CONTAINER_CACHE_ROOT,
             )
 
         self._container_ready = True
@@ -342,7 +356,9 @@ class BenchmarkRunner:
         return int(value)
 
     def _environment(self) -> dict[str, str]:
-        return {key: str(value) for key, value in self.config.environment.items()}
+        return {
+            key: str(value) for key, value in self.config.docker.environment.items()
+        }
 
     def _digest(self) -> str:
         return hashlib.sha256(config_digest(self.expanded_config).encode()).hexdigest()
@@ -374,7 +390,18 @@ class BenchmarkRunner:
             "docker": {
                 **image_data,
                 "container_name": self.container_name,
-                "host_models_path": str(self.config.docker.host_models_path),
+                "model_path": str(self.config.docker.model_path),
+                "container_model_path": self.config.docker.container_model_path,
+                "compile_cache_path": (
+                    str(self.config.docker.compile_cache_path)
+                    if self.config.docker.compile_cache_path is not None
+                    else None
+                ),
+                "container_cache_root": (
+                    VLLM_CONTAINER_CACHE_ROOT
+                    if self.config.docker.compile_cache_path is not None
+                    else None
+                ),
             },
         }
         (self.output_dir / "manifest.json").write_text(

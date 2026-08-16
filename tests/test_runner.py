@@ -59,13 +59,12 @@ def config(tmp_path: Path) -> tuple[AppConfig, dict]:
         "version": 1,
         "run_name": "run",
         "output_dir": str(tmp_path / "results"),
-        "environment": {
-            "MODEL_PATH": "/models/model",
-            "VLLM_ENGINE_READY_TIMEOUT_S": "1200",
-        },
         "docker": {
             "image": "image:tag",
-            "host_models_path": str(tmp_path / "models"),
+            "model_path": str(tmp_path / "model"),
+            "environment": {
+                "VLLM_ENGINE_READY_TIMEOUT_S": "1200",
+            },
         },
         "jobs": [
             {
@@ -100,7 +99,7 @@ def config(tmp_path: Path) -> tuple[AppConfig, dict]:
             }
         ],
     }
-    (tmp_path / "models").mkdir()
+    (tmp_path / "model").mkdir()
     return AppConfig.model_validate(raw), raw
 
 
@@ -142,3 +141,30 @@ def test_runner_generates_another_name_on_collision(tmp_path: Path) -> None:
     assert len(creates) == 1
     assert creates[0][1]["name"] != "occupied"
     assert creates[0][1]["name"].startswith("vllm-bench-run-")
+
+
+def test_runner_creates_and_mounts_compile_cache(tmp_path: Path) -> None:
+    app_config, expanded = config(tmp_path)
+    cache_path = tmp_path / "compile-cache"
+    app_config.docker.compile_cache_path = cache_path
+    app_config.docker.environment["VLLM_CACHE_ROOT"] = "/root/.cache/vllm"
+    expanded = app_config.model_dump(mode="json")
+    docker = FakeDocker()
+    runner = BenchmarkRunner(
+        app_config,
+        expanded,
+        docker=docker,
+        project_root=Path(__file__).parents[1],
+    )
+
+    assert runner.run() == 0
+    assert cache_path.is_dir()
+    creates = [command for command in docker.commands if command[0] == "create"]
+    assert creates[0][1]["compile_cache_path"] == cache_path
+    assert creates[0][1]["container_cache_root"] == "/root/.cache/vllm"
+
+    streams = [command for command in docker.commands if command[0] == "stream"]
+    assert len(streams) == 1
+    manifest = json.loads((tmp_path / "results" / "run" / "manifest.json").read_text())
+    assert manifest["docker"]["compile_cache_path"] == str(cache_path)
+    assert manifest["docker"]["container_cache_root"] == "/root/.cache/vllm"
