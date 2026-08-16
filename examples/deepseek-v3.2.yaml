@@ -15,9 +15,9 @@ jobs:
       fixed_args:
         --trust-remote-code: 
         --load-format: fastsafetensors
-        --max-num-seqs: 128
         --enable-chunked-prefill: 
         --no-enable-prefix-caching: 
+        --max-num-batched-tokens: 32768
         --kernel-config.enable_flashinfer_autotune: "False"
         --reasoning-parser: deepseek_v3
         --tokenizer-mode: deepseek_v32
@@ -47,7 +47,6 @@ jobs:
         --num-prompts: 128
         --request-rate: inf
         --temperature: 0
-        --num-warmups: 100
         --disable-tqdm: 
       stages:
         prefill:
@@ -55,11 +54,15 @@ jobs:
           args:
             --random-input-len: 8192
             --random-output-len: 1
+            --num-warmups: 100
         decode:
           enabled: true
           args:
-            --random-input-len: 128
-            --random-output-len: 8192
+            --random-input-len: 1
+            --ignore-eos:
+            --random-output-len: 512
+            --num-prompts: 8
+            --num-warmups: 2
 
     sweep:
       args:

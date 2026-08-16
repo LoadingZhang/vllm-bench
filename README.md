@@ -170,13 +170,30 @@ jobs:
             --random-output-len: 1
         decode:
           args:
-            --random-input-len: 128
-            --random-output-len: 8192
+            --random-input-len: 1
+            --ignore-eos: null
+            --random-output-len: 512
+            --num-prompts: 8
+            --num-warmups: 2
 ```
 
 Any explicitly configured value still takes precedence. For example, an
 explicit serve `--port: 9000` is automatically propagated to the benchmark
 unless the benchmark also explicitly sets its own `--port`.
+
+For Decode, the example intentionally overrides the shared prompt and warmup
+counts. It also minimizes the input to one token so that the measured workload
+is dominated by Decode rather than Prefill. `--ignore-eos` prevents generation
+from stopping when the model emits EOS, so each request continues until the
+configured `--random-output-len` limit is reached. It does not create an
+actually unbounded request.
+
+With 8 measured requests, 2 warmups, and 512 requested output tokens, the
+slowest `max_concurrency=1` workload point generates 5,120 output tokens. This
+is intended to keep one Decode workload point around five minutes on the target
+B200 setup. Actual time still depends on the model, hardware, and observed
+decode throughput; reduce `--random-output-len` or `--num-prompts` further if a
+point exceeds five minutes.
 
 ## Run
 
