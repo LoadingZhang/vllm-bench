@@ -1,0 +1,80 @@
+version: 1
+run_name: dsv32-b200
+output_dir: ./results
+
+variables:
+  MODEL_NAME: DeepSeek-V3.2
+
+environment:
+  VLLM_ENGINE_READY_TIMEOUT_S: "1200"
+
+docker:
+  image: vllm/vllm-openai:v0.20.2
+  container_name: vllm-0.20.2
+  host_models_path: /absolute/path/to/models
+
+jobs:
+  - name: dsv32
+    serve:
+      model: /models/deepseek-ai/${MODEL_NAME}
+      fixed_args:
+        --served-model-name: ${MODEL_NAME}
+        --trust-remote-code: null
+        --load-format: fastsafetensors
+        --kernel-config.enable_flashinfer_autotune: "False"
+        --enable-chunked-prefill: null
+        --reasoning-parser: deepseek_v3
+        --tokenizer-mode: deepseek_v32
+        --tool-call-parser: deepseek_v32
+        --enable-auto-tool-choice: null
+        --no-enable-prefix-caching: null
+        --port: 8000
+      variants:
+        - name: tp8
+          args:
+            -tp: 8
+        - name: tp8-ep
+          args:
+            -tp: 8
+            -ep: null
+        - name: dp8-ep
+          args:
+            -dp: 8
+            -ep: null
+
+    bench:
+      fixed_args:
+        --backend: vllm
+        --host: 127.0.0.1
+        --port: 8000
+        --endpoint: /v1/completions
+        --model: /models/deepseek-ai/${MODEL_NAME}
+        --served-model-name: ${MODEL_NAME}
+        --tokenizer-mode: deepseek_v32
+        --trust-remote-code: null
+        --dataset-name: random
+        --random-range-ratio: 0.0
+        --num-prompts: 64
+        --request-rate: inf
+        --temperature: 0
+        --num-warmups: 100
+        --disable-tqdm: null
+      stages:
+        prefill:
+          enabled: true
+          args:
+            --random-input-len: 8192
+            --random-output-len: 1
+        decode:
+          enabled: true
+          args:
+            --random-input-len: 128
+            --random-output-len: 8192
+
+    sweep:
+      args:
+        --workload-var: max_concurrency
+        --workload-iters: 6
+        --server-ready-timeout: 1200
+        --num-runs: 1
+        --show-stdout: null
