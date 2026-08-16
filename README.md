@@ -1,33 +1,29 @@
 # vllm-bench
 
-`vllm-bench` automates Docker-based `vllm bench sweep serve_workload`
-experiments. It starts one vLLM container, tests every configured server
-variant, and writes separate Prefill and Decode reports.
+`vllm-bench` 自动化执行基于 Docker 的 `vllm bench sweep serve_workload` 评测实验。它会启动一个 vLLM 容器，测试配置中的每个服务端变体（server variant），并分别输出 Prefill 和 Decode 报告。
 
-## Features
+## 功能特性
 
-- Literal CLI options: `-tp`, `--served-model-name`, and dotted options are
-  never renamed.
-- `null` represents a flag with no value.
-- Prefill and Decode profiles share one model start for each server variant.
-- Failed variants are recorded while later variants continue.
-- Raw sweep artifacts are copied from the container after every variant.
-- Reports record the configured Docker tag, image ID, and RepoDigest.
-- Interrupted runs can be resumed with `--resume`.
+- **字面量 CLI 参数**：`-tp`、`--served-model-name` 以及带点号的参数均保持原样，不做重命名。
+- **开关参数支持**：`null` 表示不带参数值的布尔开关标志（flag）。
+- **共享模型启动**：每个服务端变体的 Prefill 和 Decode 评测共用同一次模型启动。
+- **容错运行**：失败的变体会被记录，后续变体继续执行不受影响。
+- **自动保存原始数据**：每个变体运行完毕后，容器内的原始 sweep 制品均会被自动复制到宿主机。
+- **环境元数据记录**：报告中会完整记录配置的 Docker 标签、镜像 ID 以及 RepoDigest。
+- **断点续跑**：中断的运行任务可通过 `--resume` 继续执行。
 
-## Install
+## 安装
 
 ```bash
 cd ~/Codes/vllm-bench
 uv sync --extra dev
 ```
 
-The host requires Docker with NVIDIA GPU support. The configured image must
-contain `vllm bench sweep serve_workload`.
+宿主机需要安装支持 NVIDIA GPU 的 Docker。配置的镜像必须内置 `vllm bench sweep serve_workload` 命令。
 
-## Configure
+## 配置
 
-Copy `examples/deepseek-v3.2.yaml` and set an absolute model directory:
+复制 `examples/deepseek-v3.2.yaml` 并配置宿主机上模型的绝对路径：
 
 ```yaml
 docker:
@@ -35,11 +31,11 @@ docker:
   model_path: /data/models/deepseek-ai/DeepSeek-V3.2
   environment:
     VLLM_ENGINE_READY_TIMEOUT_S: "1200"
-  # Optional persistent vLLM compile cache:
+  # 可选的持久化 vLLM 编译缓存目录：
   compile_cache_path: /data/vllm-compile-cache
 ```
 
-The tool generates a unique container name for every new run, for example:
+工具每次新运行时都会生成一个唯一的容器名称，例如：
 
 ```bash
 docker run --name vllm-bench-dsv32-b200-20260816123000-a1b2c3d4 \
@@ -50,16 +46,15 @@ docker run --name vllm-bench-dsv32-b200-20260816123000-a1b2c3d4 \
   -d vllm/vllm-openai:v0.20.2
 ```
 
-The generated name has the form:
+生成的容器名称格式如下：
 
 ```text
 vllm-bench-<run-name>-<UTC timestamp>-<random suffix>
 ```
 
-### Persistent model compilation cache
+### 持久化模型编译缓存
 
-Set `docker.compile_cache_path` to reuse vLLM compilation artifacts
-between containers and benchmark runs:
+设置 `docker.compile_cache_path` 可以在不同容器和评测运行之间复用 vLLM 编译产物：
 
 ```yaml
 docker:
@@ -68,28 +63,23 @@ docker:
   compile_cache_path: /data/vllm-compile-cache
 ```
 
-The host path must be absolute. The tool creates it when it does not exist,
-mounts it at:
+宿主机路径必须是绝对路径。当目录不存在时，工具会自动创建该目录，并挂载到容器内的：
 
 ```text
 /root/.cache/vllm
 ```
 
-and automatically passes:
+同时自动将以下环境变量注入到 sweep、server 和 benchmark 进程中：
 
 ```text
 VLLM_CACHE_ROOT=/root/.cache/vllm
 ```
 
-to the sweep, server, and benchmark processes. This persists vLLM's
-torch.compile/Inductor/Triton cache, DeepGEMM cache, and other cache entries
-that inherit from `VLLM_CACHE_ROOT`. Omit the field to keep the container's
-normal ephemeral cache behavior.
+这能够持久化保存 vLLM 的 torch.compile / Inductor / Triton 缓存、DeepGEMM 缓存以及其他继承自 `VLLM_CACHE_ROOT` 的缓存。如果省略该字段，则保持容器默认的临时缓存行为（容器销毁即丢弃）。
 
-The configured host cache path and container cache root are recorded in
-`manifest.json`.
+配置的宿主机缓存路径与容器缓存根目录都会记录在 `manifest.json` 中。
 
-### Literal argument rules
+### 字面量参数规则
 
 ```yaml
 fixed_args:
@@ -99,12 +89,9 @@ fixed_args:
                                   # --kernel-config.enable_flashinfer_autotune=False
 ```
 
-Argument keys must already be valid CLI options. No underscore/hyphen or alias
-conversion is performed. Use quoted strings for literal boolean values; YAML
-booleans are reserved for tool fields such as `enabled`.
+参数的键名（key）必须已经是合法的 CLI 参数。工具不会执行下划线/连字符互转或别名转换。字面量布尔值请使用带引号的字符串（如 `"False"`）；YAML 原生布尔值保留用于工具内部字段（如 `enabled`）。
 
-Configuration variables and container environment variables are configured
-under `docker.environment`:
+配置变量和容器环境变量配置在 `docker.environment` 下：
 
 ```yaml
 docker:
@@ -112,14 +99,11 @@ docker:
     VLLM_ENGINE_READY_TIMEOUT_S: "1200"
 ```
 
-`${NAME}` first resolves from this object, then from the host process
-environment. Every configured entry is also passed through
-`docker exec --env` to the sweep, server, and benchmark processes.
+`${NAME}` 变量解析时，会先从该对象中查找，未命中再从宿主机进程的环境变量中查找。配置的每一项都会通过 `docker exec --env` 传递给 sweep、server 和 benchmark 进程。
 
-### Automatic serve and benchmark connection arguments
+### 自动推导 serve 与 benchmark 连接参数
 
-The following values do not need to be repeated under `jobs[].serve` and
-`jobs[].bench`:
+以下参数无需在 `jobs[].serve` 和 `jobs[].bench` 中重复手动配置：
 
 ```text
 serve model
@@ -131,19 +115,15 @@ bench --served-model-name
 bench --port
 ```
 
-The defaults are derived as follows:
+默认值推导规则如下：
 
-- `docker.model_path` is the complete host model directory.
-- The directory is mounted to `/models/<final directory name>` in the
-  container, and this generated container path is used as the serve/bench
-  model.
-- Served model name: `docker.environment.SERVED_MODEL_NAME`, then
-  `docker.environment.MODEL_NAME`, then the final component of
-  `docker.model_path`.
-- Port: `docker.environment.VLLM_PORT`, defaulting to `8000`.
-- Benchmark host: `127.0.0.1`.
+- `docker.model_path` 为宿主机上完整的模型目录路径。
+- 该目录会被挂载到容器内的 `/models/<目录名末尾部分>`，生成的容器路径将自动用作 serve/bench 的模型路径。
+- 服务模型名称（Served model name）：优先取 `docker.environment.SERVED_MODEL_NAME`，其次取 `docker.environment.MODEL_NAME`，最后取 `docker.model_path` 的最后一级目录名。
+- 端口号：取 `docker.environment.VLLM_PORT`，默认值为 `8000`。
+- 评测目标主机（Benchmark host）：默认为 `127.0.0.1`。
 
-For example, this is sufficient:
+例如，只需编写以下配置即可：
 
 ```yaml
 docker:
@@ -177,48 +157,32 @@ jobs:
             --num-warmups: 2
 ```
 
-Any explicitly configured value still takes precedence. For example, an
-explicit serve `--port: 9000` is automatically propagated to the benchmark
-unless the benchmark also explicitly sets its own `--port`.
+任何显式配置的值仍然具有最高优先级。例如，如果在 serve 中显式配置了 `--port: 9000`，该端口会自动传递给 benchmark，除非 benchmark 也显式配置了自己的 `--port`。
 
-For Decode, the example intentionally overrides the shared prompt and warmup
-counts. It also minimizes the input to one token so that the measured workload
-is dominated by Decode rather than Prefill. `--ignore-eos` prevents generation
-from stopping when the model emits EOS, so each request continues until the
-configured `--random-output-len` limit is reached. It does not create an
-actually unbounded request.
+对于 Decode 阶段，上述示例特意覆盖了通用的 prompt 数量与预热（warmup）次数，并将输入长度压缩为 1 个 token，以确保所测负载主要由 Decode 主导而非 Prefill。`--ignore-eos` 防止模型在生成 EOS 时提前终止，使每个请求都持续生成直至达到指定的 `--random-output-len` 限制，但不会产生真正无上限的请求。
 
-With 8 measured requests, 2 warmups, and 512 requested output tokens, the
-slowest `max_concurrency=1` workload point generates 5,120 output tokens. This
-is intended to keep one Decode workload point around five minutes on the target
-B200 setup. Actual time still depends on the model, hardware, and observed
-decode throughput; reduce `--random-output-len` or `--num-prompts` further if a
-point exceeds five minutes.
+在 8 个正式请求、2 个预热请求和 512 个输出 token 的配置下，最慢的 `max_concurrency=1` 负载点总共生成 5,120 个输出 token。在目标 B200 环境下，这样设计的单个 Decode 负载点耗时大约在 5 分钟左右。实际耗时仍取决于具体模型、硬件及观测到的解码吞吐量；若单个负载点耗时超过 5 分钟，可进一步降低 `--random-output-len` 或 `--num-prompts`。
 
-## Run
+## 运行
 
 ```bash
 uv run vllm-bench --config examples/deepseek-v3.2.yaml
 ```
 
-Useful options:
+常用命令行选项：
 
 ```text
---dry-run         Validate and print commands without invoking Docker
---resume          Continue an existing run with the same expanded config
---run-name NAME   Override run_name
---keep-container  Do not remove the container on exit
+--dry-run         校验并打印生成的命令，不实际调用 Docker
+--resume          使用相同的展开后配置继续之前未完成的运行
+--run-name NAME   覆盖配置中的 run_name
+--keep-container  执行退出时不删除 Docker 容器
 ```
 
-New runs always use dynamically generated container names, so unrelated old
-containers do not block execution. During resume, the tool first tries the
-container recorded in the original manifest. It reuses that container only
-when its image ID matches; otherwise it generates a new name, creates a new
-container, and restores the prior raw results into it.
+新启动的运行任务始终使用动态生成的容器名称，因此遗留的旧容器不会阻塞当前执行。在断点续跑（`--resume`）期间，工具会优先尝试使用原始清单（manifest）中记录的容器；仅当容器镜像 ID 完全匹配时才会复用该容器，否则会生成新名称、创建新容器并将先前的原始评测结果恢复到其中。
 
-## Results
+## 评测结果
 
-Results are written to `<output_dir>/<run_name>/`:
+结果文件会输出至 `<output_dir>/<run_name>/`：
 
 ```text
 expanded_config.yaml
@@ -232,22 +196,34 @@ logs/
 raw/
 ```
 
-Prefill throughput is computed as:
+Prefill 吞吐量计算公式：
 
 ```text
 total_input_tokens / duration
 ```
 
-Decode throughput uses the benchmark's `output_throughput`. Only workload
-points with the configured number of runs and zero failed requests are eligible
-for `best_results.json`. Repeated runs are ranked by mean throughput, then by
-P99 TTFT for Prefill or P99 TPOT for Decode, then by lower concurrency.
+Decode 吞吐量使用 benchmark 输出的 `output_throughput`。只有完成了指定运行次数且失败请求数为 0 的负载点才有资格参与 `best_results.json` 的优选。重复运行的数据首先按平均吞吐量排序，其次按 Prefill 的 P99 TTFT 或 Decode 的 P99 TPOT 排序，最后按较低并发数排序。
 
-The first version requires `--workload-var: max_concurrency`. The tool selects
-the best workload point that `serve_workload` actually tested; it does not
-claim a theoretical optimum outside those points.
+当前版本要求使用 `--workload-var: max_concurrency`。工具会在 `serve_workload` 实际测试过的负载点中选出最优解，并不假设测试范围之外存在理论最优值。
 
-## Development
+### 混合负载 1600/150 限制 TPOT 的对比实验
+
+`examples/deepseek-v3.2-mixed-1600-150.yaml` 比较了 TP8 与 DP8+EP 在固定 1,600 输入 token 和 150 输出 token 下的表现。每个请求都包含 Prefill 和 Decode 负载。Decode 阶段配置了：
+
+```yaml
+selection:
+  mean_tpot_ms_lt: 50
+```
+
+实测平均 TPOT 不严格小于 50 ms 的负载点仍会保留在 `decode_results.csv` 中，但会被标记为 `slo_met=false` 和 `eligible=false`。`best_results.json` 会为每个变体选出符合条件（eligible）且输出吞吐量最高的负载点，并在以下路径选出 TP8 和 DP8+EP 之间的胜出者：
+
+```text
+jobs.mixed-1600-150.decode
+```
+
+若该字段不存在，则说明两个变体均未产生满足“平均 TPOT < 50 ms 且无失败请求”的完整负载点数据。
+
+## 开发
 
 ```bash
 uv run pytest -v

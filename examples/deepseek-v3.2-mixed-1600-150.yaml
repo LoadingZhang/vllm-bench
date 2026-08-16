@@ -1,5 +1,5 @@
 version: 1
-run_name: dsv32-b200
+run_name: dsv32-b200-mixed-1600-150
 output_dir: ./results
 
 docker:
@@ -10,59 +10,56 @@ docker:
     VLLM_ENGINE_READY_TIMEOUT_S: "1200"
 
 jobs:
-  - name: dsv32
+  - name: mixed-1600-150
     serve:
       fixed_args:
-        --trust-remote-code: 
+        --trust-remote-code:
         --load-format: fastsafetensors
-        --enable-chunked-prefill: 
-        --no-enable-prefix-caching: 
+        --enable-chunked-prefill:
+        --no-enable-prefix-caching:
         --max-num-batched-tokens: 16384
         --kernel-config.enable_flashinfer_autotune: "False"
         --reasoning-parser: deepseek_v3
         --tokenizer-mode: deepseek_v32
         --tool-call-parser: deepseek_v32
-        --enable-auto-tool-choice: 
+        --enable-auto-tool-choice:
       variants:
         - name: tp8
           args:
             -tp: 8
-        - name: tp8-ep
-          args:
-            -tp: 8
-            -ep: 
         - name: dp8-ep
           args:
             -dp: 8
-            -ep: 
+            -ep:
 
     bench:
       fixed_args:
         --backend: vllm
         --endpoint: /v1/completions
         --tokenizer-mode: deepseek_v32
-        --trust-remote-code: 
+        --trust-remote-code:
         --dataset-name: random
         --random-range-ratio: 0.0
-        --num-prompts: 128
+        --num-prompts: 64
         --request-rate: inf
         --temperature: 0
-        --disable-tqdm: 
+        --num-warmups: 2
+        --disable-tqdm:
       stages:
         prefill:
-          enabled: true
-          args:
-            --random-input-len: 8192
-            --random-output-len: 1
-            --num-warmups: 100
+          enabled: false
         decode:
           enabled: true
+          selection:
+            # Only successful points whose measured mean TPOT is strictly
+            # below 50 ms are eligible for best_results.json.
+            mean_tpot_ms_lt: 50
           args:
-            --random-input-len: 1
+            # A mixed online workload: every request includes both prefill
+            # and decode work, with fixed lengths.
+            --random-input-len: 1600
+            --random-output-len: 150
             --ignore-eos:
-            --random-output-len: 512
-            --num-prompts: 8
-            --num-warmups: 2
 
     sweep:
       args:
@@ -70,4 +67,4 @@ jobs:
         --workload-iters: 6
         --server-ready-timeout: 1200
         --num-runs: 1
-        --show-stdout: 
+        --show-stdout:

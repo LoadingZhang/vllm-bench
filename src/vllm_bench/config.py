@@ -70,9 +70,20 @@ class ServeConfig(StrictModel):
         return self
 
 
+class StageSelectionConfig(StrictModel):
+    mean_tpot_ms_lt: float | None = None
+
+    @model_validator(mode="after")
+    def validate_limits(self) -> StageSelectionConfig:
+        if self.mean_tpot_ms_lt is not None and self.mean_tpot_ms_lt <= 0:
+            raise ValueError("selection.mean_tpot_ms_lt must be greater than zero")
+        return self
+
+
 class StageConfig(StrictModel):
     enabled: bool = True
     args: RawArgs = Field(default_factory=dict)
+    selection: StageSelectionConfig = Field(default_factory=StageSelectionConfig)
 
 
 class StagesConfig(StrictModel):

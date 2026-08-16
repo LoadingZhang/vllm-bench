@@ -23,6 +23,8 @@ _RESULT_COLUMNS = [
     "run_count",
     "expected_run_count",
     "eligible",
+    "slo_met",
+    "mean_tpot_ms_limit_exclusive",
     "completed_mean",
     "failed_total",
     "duration_mean",
@@ -102,9 +104,11 @@ def build_reports(
     image: ImageMetadata,
     variant_metadata: dict[tuple[str, str], dict[str, str]],
     expected_runs: dict[tuple[str, str], int],
+    selection_limits: dict[tuple[str, str], float] | None = None,
 ) -> dict[str, Any]:
     """Write prefill/decode CSV files and a best-results JSON file."""
 
+    selection_limits = selection_limits or {}
     grouped: dict[tuple[str, str, str, int], list[dict[str, Any]]] = defaultdict(list)
     for job, variant, record in _load_run_records(output_dir / "raw"):
         stage = record.get("vllm_bench_profile")
@@ -118,6 +122,7 @@ def build_reports(
         expected = expected_runs[(job, variant)]
         failed_total = sum(int(record.get("failed") or 0) for record in records)
         metadata = variant_metadata[(job, variant)]
+        complete_and_successful = len(records) >= expected and failed_total == 0
         row: dict[str, Any] = {
             "run_name": run_name,
             "job": job,
@@ -129,7 +134,6 @@ def build_reports(
             "max_concurrency": concurrency,
             "run_count": len(records),
             "expected_run_count": expected,
-            "eligible": len(records) >= expected and failed_total == 0,
             "completed_mean": _mean(records, "completed"),
             "failed_total": failed_total,
             "duration_mean": _mean(records, "duration"),
@@ -143,6 +147,18 @@ def build_reports(
             "bench_command": metadata["bench_command"],
         }
         row.update({field: _mean(records, field) for field in _LATENCY_FIELDS})
+        mean_tpot_limit = selection_limits.get((job, stage))
+        mean_tpot = row["mean_tpot_ms"]
+        slo_met = mean_tpot_limit is None or (
+            mean_tpot is not None and float(mean_tpot) < mean_tpot_limit
+        )
+        row.update(
+            {
+                "eligible": complete_and_successful and slo_met,
+                "slo_met": slo_met,
+                "mean_tpot_ms_limit_exclusive": mean_tpot_limit,
+            }
+        )
         stage_rows[stage].append(row)
 
     for stage, rows in stage_rows.items():

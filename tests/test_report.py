@@ -36,6 +36,7 @@ def record(stage: str, concurrency: int, throughput: float, latency: float) -> d
         "total_input_tokens": throughput * duration,
         "output_throughput": throughput,
         "request_throughput": 1.0,
+        "mean_tpot_ms": latency,
         "p99_ttft_ms": latency,
         "p99_tpot_ms": latency,
     }
@@ -84,3 +85,35 @@ def test_incomplete_or_failed_points_are_not_eligible(tmp_path: Path) -> None:
         expected_runs={("job", "tp8"): 1},
     )
     assert best["jobs"]["job"]["prefill"]["max_concurrency"] == 4
+
+
+def test_decode_selection_requires_mean_tpot_below_limit(tmp_path: Path) -> None:
+    raw = tmp_path / "raw"
+    write_summary(raw, "job", "tp8", "decode", 4, [record("decode", 4, 40, 40)])
+    write_summary(raw, "job", "tp8", "decode", 8, [record("decode", 8, 80, 50)])
+    write_summary(
+        raw, "job", "dp8-ep", "decode", 16, [record("decode", 16, 70, 49)]
+    )
+
+    best = build_reports(
+        output_dir=tmp_path,
+        run_name="run",
+        image=ImageMetadata("image", "id", []),
+        variant_metadata={
+            ("job", "tp8"): {"serve_command": "serve-tp8", "bench_command": "bench"},
+            ("job", "dp8-ep"): {
+                "serve_command": "serve-dp8-ep",
+                "bench_command": "bench",
+            },
+        },
+        expected_runs={("job", "tp8"): 1, ("job", "dp8-ep"): 1},
+        selection_limits={("job", "decode"): 50},
+    )
+
+    assert best["variants"]["job"]["tp8"]["decode"]["max_concurrency"] == 4
+    assert best["jobs"]["job"]["decode"]["variant"] == "dp8-ep"
+    with (tmp_path / "decode_results.csv").open() as file:
+        rows = list(csv.DictReader(file))
+    failed_slo = next(row for row in rows if row["max_concurrency"] == "8")
+    assert failed_slo["slo_met"] == "False"
+    assert failed_slo["eligible"] == "False"

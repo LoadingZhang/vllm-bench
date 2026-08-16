@@ -92,6 +92,7 @@ class BenchmarkRunner:
                 image=self.image_metadata,
                 variant_metadata=self.variant_metadata,
                 expected_runs=self.expected_runs,
+                selection_limits=self._selection_limits(),
             )
             self._write_failures()
             status = "failed" if self.failures else "completed"
@@ -354,6 +355,18 @@ class BenchmarkRunner:
     def _expected_num_runs(self, sweep_args: dict[str, Any]) -> int:
         value = sweep_args.get("--num-runs", 3)
         return int(value)
+
+    def _selection_limits(self) -> dict[tuple[str, str], float]:
+        limits: dict[tuple[str, str], float] = {}
+        for job in self.config.jobs:
+            for stage_name, stage in (
+                ("prefill", job.bench.stages.prefill),
+                ("decode", job.bench.stages.decode),
+            ):
+                limit = stage.selection.mean_tpot_ms_lt
+                if stage.enabled and limit is not None:
+                    limits[(job.name, stage_name)] = limit
+        return limits
 
     def _environment(self) -> dict[str, str]:
         return {
